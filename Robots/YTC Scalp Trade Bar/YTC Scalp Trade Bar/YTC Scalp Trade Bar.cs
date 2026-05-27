@@ -19,8 +19,21 @@ public class YTCScalpTradeBar : Robot
     [Parameter(DefaultValue=5000)]
     public double Capital { get; set; }
 
-    [Parameter(DefaultValue = 1)]
+    [Parameter(DefaultValue = 0.5)]
     public double DailyRiskLimitPercent { get; set; }
+
+    [Parameter(DefaultValue = 5)]
+    public double LossesAllowed { get; set; }
+
+    // if true each lot will actually be treated as a seperate trade, so each part counts
+    // as 1 trade towrd risk limit, and have same SL and position size
+    [Parameter(DefaultValue=true)]
+    public bool TreatLotsAsSeperate { get; set; }
+
+    // if true, SL will be set wide, and all positions are closed when cash loss >= trade risk amount
+    // if TreatLotsAsSeperate is false, risk amount is computed value, is true, risk amount is double computed value
+    [Parameter(DefaultValue=true)]
+    public bool NetValueStopLoss { get; set; }
 
    //[Parameter(DefaultValue = 0.01)]
    // public double Position1Lots { get; set; }
@@ -42,6 +55,11 @@ public class YTCScalpTradeBar : Robot
     private Button closeHalfButton;
     private Button counterButton;
     private Button flatButton;
+    private Button gotoBEPart1Button;
+    private Button gotoBEPart2Button;
+    private Button bePart1Button;
+    private Button bePart2Button;
+    private Button exitOnPositiveButton;
     private ChartStaticText drawDownLabel;
 
     private KeltnerChannels _keltnerChannels;
@@ -51,10 +69,15 @@ public class YTCScalpTradeBar : Robot
     private int secondsLeft1 = 0;
     private int secondsLeft2 = 0;
 
+    private bool bePart1 = false;
+    private bool bePart2 = false;
+    private bool exitWhenPositive = false;
+
     private double Position1Lots;
     private double Position2Lots;
 
     private double drawDownAllowed = 0;
+    private double perTradeRiskAmount = 0;
 
     protected override void OnStart()
     {
@@ -74,10 +97,11 @@ public class YTCScalpTradeBar : Robot
             Margin = new Thickness(5)
         };
 
-        double positionRisk = DailyRiskLimitPercent / 4;
+        double positionRisk = DailyRiskLimitPercent / LossesAllowed;
         Print("Position Risk: ", positionRisk);
-        Print("SL Size: ", pipsInBand() * 3);
-        Position1Lots = Symbol.VolumeInUnitsToQuantity(Symbol.VolumeForProportionalRisk( ProportionalAmountType.Balance, positionRisk, pipsInBand() * 3 ));
+    //    double slBandMulitple = TreatLotsAsSeperate ? 2 : 3;
+     //   Print("SL Size: ", pipsInBand() * slBandMulitple);
+        Position1Lots = getLotsForRisk(); //Symbol.VolumeInUnitsToQuantity(Symbol.VolumeForProportionalRisk( ProportionalAmountType.Balance, positionRisk, pipsInBand() * slBandMulitple ));
         Print("V4R ",Position1Lots );
         Position2Lots = Position1Lots;
         
@@ -99,15 +123,68 @@ public class YTCScalpTradeBar : Robot
         };
         stackPanel.AddChild(sellButton);
 
-        closeHalfButton = new Button { Text = "TP HALF", Style = buttonStyle, BackgroundColor = Color.DarkBlue };
+        bePart1Button = new Button { Text = "BE PART 1", Style = buttonStyle, BackgroundColor = Color.Gray };
+        bePart1Button.Click += args =>
+        {
+            bePart1 = !bePart1;
+            updateButtons();
+        };
+        bePart1Button.IsVisible = false;
+        stackPanel.AddChild(bePart1Button);
+ 
+
+        bePart2Button = new Button { Text = "BE PART 2", Style = buttonStyle, BackgroundColor = Color.Gray };
+        bePart2Button.Click += args =>
+        {
+            bePart2 = !bePart2;
+            updateButtons();
+        };
+        bePart2Button.IsVisible = false;
+        stackPanel.AddChild(bePart2Button);
+
+        exitOnPositiveButton = new Button { Text = "EXIT BE", Style = buttonStyle, BackgroundColor = Color.Gray };
+        exitOnPositiveButton.Click += args =>
+        {
+            exitWhenPositive = !exitWhenPositive;
+            updateButtons();
+        };
+        exitOnPositiveButton.IsVisible = false;
+        stackPanel.AddChild(exitOnPositiveButton);
+
+        // move all stop losses to BE provided they are not already beyond entry price
+        gotoBEPart1Button = new Button { Text = "SL 1 BE", Style = buttonStyle, BackgroundColor = Color.DarkSlateBlue };
+        gotoBEPart1Button.Click += args =>
+        {
+            goBE( Positions.First() );
+        };
+        gotoBEPart1Button.IsVisible = false;
+        stackPanel.AddChild(gotoBEPart1Button);
+        
+        gotoBEPart2Button = new Button { Text = "SL 2 BE", Style = buttonStyle, BackgroundColor = Color.DarkSlateBlue };
+        gotoBEPart2Button.Click += args =>
+        {
+            goBE( Positions.Last() );
+        };
+        gotoBEPart2Button.IsVisible = false;
+        stackPanel.AddChild(gotoBEPart2Button);
+
+        closeHalfButton = new Button { Text = "TP P1", Style = buttonStyle, BackgroundColor = Color.DarkBlue };
         closeHalfButton.Click += args =>
         {
-            // close positions
-            if ( Positions.Count == 1 ) {
-                goFlat();
-            } else {
-                ClosePosition(Positions[0]);
-            }
+            // close the first position opened
+            ClosePosition( Positions.FirstOrDefault() );
+           // if ( Positions.Count == 1 ) {
+            //    goFlat();
+           // } else {
+                // find a position in least profit but not negative and close that, otherwise we just take the first one opened
+             //   if ( Positions.First().NetProfit >= 0 && Positions.First().NetProfit < Positions.Last().NetProfit ) {
+              //      ClosePosition( Positions.First() );
+              //  } else if ( Positions.Last().NetProfit >= 0 && Positions.Last().NetProfit < Positions.First().NetProfit ) { 
+              //      ClosePosition( Positions.Last() );
+              //  } else {
+              //      ClosePosition( Positions.OrderBy(order => order.NetProfit).FirstOrDefault() );
+              //  }
+            //}
         };
         closeHalfButton.IsVisible = false;
         stackPanel.AddChild(closeHalfButton);
@@ -141,11 +218,23 @@ public class YTCScalpTradeBar : Robot
         }
     }
 
+    private double getLotsForRisk() {
+        double slBandMulitple = TreatLotsAsSeperate ? 2 : 3;
+        double slSize = pipsInBand() * slBandMulitple;
+        Print("SL Size: ", slSize);
+
+        double riskAmount = (Capital * (DailyRiskLimitPercent / 100))  / LossesAllowed;
+        double calculatedVolume  = riskAmount / (slSize * Symbol.PipValue);
+        return Symbol.VolumeInUnitsToQuantity( Symbol.NormalizeVolumeInUnits(calculatedVolume) );
+    }
+
     private void showRemainingDrawdown() {
         double bandSize = pipsInBand();
-        double risk = ((Symbol.QuantityToVolumeInUnits(Position1Lots) * bandSize * 2) + (Symbol.QuantityToVolumeInUnits(Position2Lots) * bandSize)) * Symbol.PipValue;
-        drawDownLabel.Text = FormattableString.Invariant($"Lots: {Position1Lots:0.0##}/{Position2Lots:0.0##}  Position Risk: ${risk:0.00}      Limit Remaining: ${drawDownAllowed:0.00}");
-        if ( drawDownAllowed <= risk ) {
+        perTradeRiskAmount = ((Symbol.QuantityToVolumeInUnits(Position1Lots) * bandSize * 2) + (TreatLotsAsSeperate ? 0 : Symbol.QuantityToVolumeInUnits(Position2Lots) * bandSize)) * Symbol.PipValue;
+        double netValueStop = getNetValueStop();
+        string stoptype = ( NetValueStopLoss ? $"Net Value Stop ${netValueStop:0.00}" : "Hard Stop");
+        drawDownLabel.Text = FormattableString.Invariant($"Lots: {Position1Lots:0.0##}/{Position2Lots:0.0##}  Risk: ${perTradeRiskAmount:0.00}   Limit: ${drawDownAllowed:0.00}  {stoptype}");
+        if ( drawDownAllowed <= perTradeRiskAmount ) {
             drawDownLabel.Color = Color.OrangeRed;
         } else if ( drawDownAllowed < 0 ) {
             drawDownLabel.Color = Color.Red;
@@ -153,8 +242,6 @@ public class YTCScalpTradeBar : Robot
             drawDownLabel.Color = Color.DimGray;
         }
     }
-
-
 
     private void buy() {
        // if ( !noMoreOrders ) {
@@ -180,12 +267,16 @@ public class YTCScalpTradeBar : Robot
         }
     }
 
+    private void goBE( Position position ) {
+        position.ModifyStopLossPrice( position.EntryPrice );
+    }
+
     private double getTP( TradeType side ) {
       //  if ( TakeProfitPips == 0 ) {
         if ( side == TradeType.Buy ) {
-            return _keltnerChannels.Top.Last(0) - Symbol.Bid;
+            return toPips(_keltnerChannels.Top.Last(0) - Symbol.Bid);
         } else {
-            return Symbol.Bid - _keltnerChannels.Bottom.Last(0);
+            return toPips(Symbol.Bid - _keltnerChannels.Bottom.Last(0));
         }
       //  } else {
       //      return TakeProfitPips;
@@ -194,20 +285,32 @@ public class YTCScalpTradeBar : Robot
 
     private double getStopLossPips( double price, bool newMarketOrder = false ) {
         double bandSize = pipsInBand();
-        // count how many active orders, but if we are going to place a new market order
-        // right now bump this by one to cater for order not in system yet
-        int totalOrders = Positions.Count + PendingOrders.Count + (newMarketOrder ? 1 : 0);
-        if ( totalOrders == 1 ) {
-            // first order always has a stop size to include basic and major wholesale region
-            return bandSize * 2;
+        if ( NetValueStopLoss ) {
+            // stop loss is not a market order but rather all positions closed when net value of open positions is >= -risk amount
+            // we set a hard stop here wquite wide simply as a precaution in case of network outage etc
+            return bandSize * 4;
         } else {
-            // second order has same stop loss as first
-            if ( Positions.Count > 0 ) {
-                return Math.Abs(price - Positions[0].StopLoss ?? 0);
+            // count how many active orders, but if we are going to place a new market order
+            // right now bump this by one to cater for order not in system yet
+            int totalOrders = Positions.Count + PendingOrders.Count + (newMarketOrder ? 1 : 0);
+            if ( totalOrders == 1 || TreatLotsAsSeperate ) {
+                // first order always has a stop size to include basic and major wholesale region
+                // if we are treating each position as a seperate trade (so it counts as 1 of our daily risks) then it gets same
+                // size stop no matter if it is second or first order
+                return bandSize * 2;
             } else {
-                return Math.Abs(price - PendingOrders[0].StopLoss ?? 0);
+                // second order has same stop loss as first 
+                if ( Positions.Count > 0 ) {
+                    return toPips( Math.Abs(price - Positions.OrderBy(order => order.EntryTime).FirstOrDefault().StopLoss ?? 0) );
+                } else {
+                    return toPips( Math.Abs(price - PendingOrders.OrderBy(order => order.SubmittedTime).FirstOrDefault().StopLoss ?? 0) );
+                }
             }
         }
+    }
+
+    private double getNetValueStop() {
+        return perTradeRiskAmount * (TreatLotsAsSeperate ? -2 : -1);
     }
 
     private string getPositionLabel() {
@@ -276,19 +379,83 @@ public class YTCScalpTradeBar : Robot
     {
         buyButton.IsVisible = getTotalOrders() < 2 && _keltnerChannels.Main.Last(0) > Symbol.Bid;
         sellButton.IsVisible = getTotalOrders() < 2 && _keltnerChannels.Main.Last(0) < Symbol.Bid;
+
+        if ( bePart1 ) {
+            if ( Positions.First().NetProfit >= 0 ) {
+                ClosePosition(Positions.First());
+                bePart1 = false;
+                bePart1Button.BackgroundColor = Color.Gray;
+            }
+        }
+ 
+        if ( bePart2 ) {
+            if ( Positions.Last().NetProfit >= 0 ) {
+                ClosePosition(Positions.Last());
+                bePart2 = false;
+                bePart2Button.BackgroundColor = Color.Gray;
+            }
+        }
+
+        if ( NetValueStopLoss && Positions.Count > 0 ) {
+            double netProfit = 0;
+            foreach ( Position p in Positions ) {
+                netProfit += p.NetProfit;
+            }
+
+            // if we are BE or better check if we requested to exit the trade if we are not overall negative
+            if ( exitWhenPositive && netProfit >= 0 ) {
+                goFlat();
+                return;
+            }
+
+            // if net profit is <= to the per trade risk amount (or double the risk amount if we are allowed to treat each position as a seperate trade)
+            // then its stoploss so close out all positions;   note what treating trades seperatly it does not matter if there is only 1 trade one, wwe still use
+            // 2*risk value as stop loss as risk per trade will already be lower in this case as number of losses per day will be set higher
+            if ( netProfit <= getNetValueStop() ) {
+                goFlat();
+            } else {
+                flatButton.Text = $"${netProfit:0.00} (X)";
+                flatButton.BackgroundColor = netProfit < 0 ? Color.DarkRed : Color.DarkGreen;
+            }
+        }
     }
 
     private void resetState() {
         Timer.Stop();
         showHideButtons(true);
         counterButton.BackgroundColor = Color.Gray;
+
+        bePart1 = false;
+        bePart2 = false;
+        exitWhenPositive = false;
+        updateButtons();
     }
+
+    private void updateButtons() {
+        closeHalfButton.IsVisible = ( Positions.Count > 1 );
+        bePart1Button.BackgroundColor = bePart1 ? Color.Orange : Color.Gray;
+        bePart2Button.BackgroundColor = bePart2 ? Color.Orange : Color.Gray;
+        exitOnPositiveButton.BackgroundColor = exitWhenPositive ? Color.Orange : Color.Gray;
+        bePart1Button.IsVisible = ( Positions.Count > 0 );
+        bePart2Button.IsVisible = ( Positions.Count > 1 );
+        gotoBEPart1Button.IsVisible = ( Positions.Count > 0 );
+        gotoBEPart2Button.IsVisible = ( Positions.Count > 1 );
+        exitOnPositiveButton.IsVisible = ( Positions.Count > 0 );
+
+        if ( Positions.Count == 0 ) {
+            flatButton.Text = "GO FLAT";
+            flatButton.BackgroundColor = Color.SteelBlue;
+        }
+
+    } 
 
     private void showHideButtons( bool visible ) {
         buyButton.IsVisible = visible;
         sellButton.IsVisible = visible;
         closeHalfButton.IsVisible = !visible;
         counterButton.IsVisible = !visible;
+        gotoBEPart2Button.IsVisible = !visible;
+        gotoBEPart1Button.IsVisible = !visible;
     }
 
     protected override void OnStop()
@@ -334,9 +501,8 @@ public class YTCScalpTradeBar : Robot
         // update or remove volume on pending orders to ensure we can never have more than
         // two positions in 
         updateOrders();
-
         showHideButtons(false);
-        closeHalfButton.IsVisible = ( Positions.Count > 1 );
+        updateButtons();
 
         if ( Positions.Count > 1) {
             secondsLeft2 = 120;
@@ -352,8 +518,9 @@ public class YTCScalpTradeBar : Robot
 
     private void OnPositionClosed(PositionClosedEventArgs obj)
     {
-        closeHalfButton.IsVisible = ( Positions.Count > 1 );
-        
+        bePart2 = false;        // only one part left, so just left Part 1 BE even if it is called Part 2 to make buttons simple to operate
+        updateButtons();
+
         // clear counter for the trade we closed, part1 or part2
         if ( obj.Position.Label.EndsWith("1") ) {
             secondsLeft1 = 0;
@@ -369,17 +536,20 @@ public class YTCScalpTradeBar : Robot
     }
 
     private void OnPendingOrder(PendingOrderCreatedEventArgs obj) {
-        updatePendingOrderVolume(obj.PendingOrder);
-        obj.PendingOrder.ModifyStopLossPips( getStopLossPips(obj.PendingOrder.TargetPrice) );
-        obj.PendingOrder.ModifyTakeProfitPrice( obj.PendingOrder.TradeType == TradeType.Buy ? _keltnerChannels.Top.Last(0) : _keltnerChannels.Bottom.Last(0) );
+        if ( updatePendingOrderVolume(obj.PendingOrder) ) {
+            obj.PendingOrder.ModifyStopLossPips( getStopLossPips(obj.PendingOrder.TargetPrice) );
+            obj.PendingOrder.ModifyTakeProfitPrice( obj.PendingOrder.TradeType == TradeType.Buy ? _keltnerChannels.Top.Last(0) : _keltnerChannels.Bottom.Last(0) );
+        }
     }
 
-    private void updatePendingOrderVolume( PendingOrder order ) {
+    private bool updatePendingOrderVolume( PendingOrder order ) {
         double volume = getVolume( order.TargetPrice );
         if ( volume > 0.0 ) {
             order.ModifyVolume(volume);
+            return true;
         } else {
             CancelPendingOrder(order);
+            return false;
         }
     }
 }
