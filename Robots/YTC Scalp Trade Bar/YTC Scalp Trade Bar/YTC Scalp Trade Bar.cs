@@ -52,7 +52,8 @@ public class YTCScalpTradeBar : Robot
 
     private Button buyButton;
     private Button sellButton;
-    private Button closeHalfButton;
+    private Button closePart1Button;
+    private Button closePart2Button;
     private Button counterButton;
     private Button flatButton;
     private Button gotoBEPart1Button;
@@ -60,6 +61,10 @@ public class YTCScalpTradeBar : Robot
     private Button bePart1Button;
     private Button bePart2Button;
     private Button exitOnPositiveButton;
+
+    private Button[] tradeLabelFlowButtons;
+    private Button[] tradeLabelBiasButtons;
+
     private ChartStaticText drawDownLabel;
 
     private KeltnerChannels _keltnerChannels;
@@ -79,8 +84,16 @@ public class YTCScalpTradeBar : Robot
     private double drawDownAllowed = 0;
     private double perTradeRiskAmount = 0;
 
+    private string tradeLabelFlow = "WF";
+    private string tradeLabelBias = "WB";
+
     protected override void OnStart()
-    {
+    {   
+        // if captial is not set then default to either one of our 5k or 10k accounts
+        if ( Capital == 0 ) {
+            Capital = Account.Balance > 9000 ? 10000 : 5000;
+        }
+
         _keltnerChannels = Indicators.KeltnerChannels(KeltnerPeriod, MovingAverageType.Simple, 10, MovingAverageType.Simple, BandMultiple * 2);
         _innerChannels = Indicators.KeltnerChannels(KeltnerPeriod, MovingAverageType.Simple, 10, MovingAverageType.Simple, BandMultiple);
 
@@ -168,26 +181,23 @@ public class YTCScalpTradeBar : Robot
         gotoBEPart2Button.IsVisible = false;
         stackPanel.AddChild(gotoBEPart2Button);
 
-        closeHalfButton = new Button { Text = "TP P1", Style = buttonStyle, BackgroundColor = Color.DarkBlue };
-        closeHalfButton.Click += args =>
+        closePart1Button = new Button { Text = "TP P1", Style = buttonStyle, BackgroundColor = Color.DarkBlue };
+        closePart1Button.Click += args =>
         {
             // close the first position opened
             ClosePosition( Positions.FirstOrDefault() );
-           // if ( Positions.Count == 1 ) {
-            //    goFlat();
-           // } else {
-                // find a position in least profit but not negative and close that, otherwise we just take the first one opened
-             //   if ( Positions.First().NetProfit >= 0 && Positions.First().NetProfit < Positions.Last().NetProfit ) {
-              //      ClosePosition( Positions.First() );
-              //  } else if ( Positions.Last().NetProfit >= 0 && Positions.Last().NetProfit < Positions.First().NetProfit ) { 
-              //      ClosePosition( Positions.Last() );
-              //  } else {
-              //      ClosePosition( Positions.OrderBy(order => order.NetProfit).FirstOrDefault() );
-              //  }
-            //}
         };
-        closeHalfButton.IsVisible = false;
-        stackPanel.AddChild(closeHalfButton);
+        closePart1Button.IsVisible = false;
+        stackPanel.AddChild(closePart1Button);
+
+        closePart2Button = new Button { Text = "TP P2", Style = buttonStyle, BackgroundColor = Color.DarkBlue };
+        closePart2Button.Click += args =>
+        {
+            // close the first position opened
+            ClosePosition( Positions.FirstOrDefault() );
+        };
+        closePart2Button.IsVisible = false;
+        stackPanel.AddChild(closePart2Button);
 
         flatButton = new Button { Text = "GO FLAT", Style = buttonStyle, BackgroundColor = Color.SteelBlue };
         flatButton.Click += args =>
@@ -203,15 +213,69 @@ public class YTCScalpTradeBar : Robot
         };
         stackPanel.AddChild(counterButton);
 
+        stackPanel.AddChild(createHorizontalDivider());
+        
+        tradeLabelFlowButtons = new Button[] {
+            createTradeTypeFlowButton(buttonStyle, "WF"),
+            createTradeTypeFlowButton(buttonStyle, "CF"),
+        };
+        foreach ( Button b in tradeLabelFlowButtons ) {
+            stackPanel.AddChild(b);
+        }
+
+        stackPanel.AddChild(createHorizontalDivider());
+
+        tradeLabelBiasButtons = new Button[] {
+            createTradeTypeBiasButton(buttonStyle, "WB"),
+            createTradeTypeBiasButton(buttonStyle, "CB"),
+        };
+        foreach ( Button b in tradeLabelBiasButtons ) {
+            stackPanel.AddChild(b);
+        }
+                
         Chart.AddControl(stackPanel);
         resetState();
 
     }
 
+    private Border createHorizontalDivider()
+    {
+        var divider = new Border 
+        {
+            Height = 1, 
+            BackgroundColor = Color.Gray, // Customize your divider color
+            Margin = new Thickness(0, 5, 0, 5) // Space above and below the line
+        };
+        return divider;
+    }
+
+    private Button createTradeTypeFlowButton( Style buttonStyle, string typeLabel ) {
+        Button b = new Button { Text = typeLabel, Style = buttonStyle, BackgroundColor = Color.Gray };
+        b.Click += args =>
+        {
+            tradeLabelFlow = typeLabel;   
+            Print($"Trade opened will be {tradeLabelFlow}");
+            updateButtons();
+        };
+        return b;
+    }  
+
+    private Button createTradeTypeBiasButton( Style buttonStyle, string typeLabel ) {
+        Button b = new Button { Text = typeLabel, Style = buttonStyle, BackgroundColor = Color.Gray };
+        b.Click += args =>
+        {
+            tradeLabelBias = typeLabel;   
+            Print($"Trade opened will be {tradeLabelBias}");
+            updateButtons();
+        };
+        return b;
+    }  
+
     // return total drawdown experience so far today, used for initialiazion
     // after init a running drawdown total is tracked to safve iterating entire history
     private void computeInitialDrawdown() {
-        drawDownAllowed = Capital * (DailyRiskLimitPercent/100);
+        // changed this to show net P&L for day for new model of risking one full stop out per eval and rotating
+        drawDownAllowed = 0; // Capital * (DailyRiskLimitPercent/100);
         // Query history for positions closed today
         foreach ( var order in History.Where(x => x.ClosingTime.Date == Time.Date) ) {
            drawDownAllowed += order.NetProfit;
@@ -233,27 +297,28 @@ public class YTCScalpTradeBar : Robot
         perTradeRiskAmount = ((Symbol.QuantityToVolumeInUnits(Position1Lots) * bandSize * 2) + (TreatLotsAsSeperate ? 0 : Symbol.QuantityToVolumeInUnits(Position2Lots) * bandSize)) * Symbol.PipValue;
         double netValueStop = getNetValueStop();
         string stoptype = ( NetValueStopLoss ? $"Net Value Stop ${netValueStop:0.00}" : "Hard Stop");
-        drawDownLabel.Text = FormattableString.Invariant($"Lots: {Position1Lots:0.0##}/{Position2Lots:0.0##}  Risk: ${perTradeRiskAmount:0.00}   Limit: ${drawDownAllowed:0.00}  {stoptype}");
-        if ( drawDownAllowed <= perTradeRiskAmount ) {
+        drawDownLabel.Text = FormattableString.Invariant($"Lots: {Position1Lots:0.0##}/{Position2Lots:0.0##}  Risk: ${perTradeRiskAmount:0.00}   P&L: ${drawDownAllowed:0.00}  {stoptype}");
+       /* if ( drawDownAllowed <= perTradeRiskAmount ) {
             drawDownLabel.Color = Color.OrangeRed;
         } else if ( drawDownAllowed < 0 ) {
             drawDownLabel.Color = Color.Red;
+        } else {
+            drawDownLabel.Color = Color.DimGray;
+        }*/
+        if ( drawDownAllowed <= -perTradeRiskAmount ) {
+            drawDownLabel.Color = Color.Red;
+        } else if ( drawDownAllowed >= perTradeRiskAmount ) {
+            drawDownLabel.Color = Color.Green;
         } else {
             drawDownLabel.Color = Color.DimGray;
         }
     }
 
     private void buy() {
-       // if ( !noMoreOrders ) {
-            // cannot add more orders after this is there is already 1 open if splitting, or at all if no split
-      //      noMoreOrders = SplitLots ? Positions.Count == 1 : true;
         openPosition(TradeType.Buy);
     }
 
     private void sell() {
-      //  if ( !noMoreOrders ) {
-            // cannot add more orders after this is there is already 1 open if splitting, or at all if no split
-       //     noMoreOrders = SplitLots ? Positions.Count == 1 : true;
         openPosition(TradeType.Sell);
     }
 
@@ -262,7 +327,8 @@ public class YTCScalpTradeBar : Robot
             double price = type == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
             double volume = getVolume(price);
             if ( volume > 0.0 ) {
-                ExecuteMarketOrderAsync(type, SymbolName, volume, "", getStopLossPips(price,true), getTP(type));
+                int partNumber = Positions.Count + 1;
+                ExecuteMarketOrderAsync(type, SymbolName, volume, $"SC P{partNumber} {tradeLabelFlow} {tradeLabelBias}", getStopLossPips(price,true), getTP(type));
             }
         }
     }
@@ -396,26 +462,28 @@ public class YTCScalpTradeBar : Robot
             }
         }
 
-        if ( NetValueStopLoss && Positions.Count > 0 ) {
+        if ( Positions.Count > 0 ) {
             double netProfit = 0;
             foreach ( Position p in Positions ) {
                 netProfit += p.NetProfit;
             }
 
-            // if we are BE or better check if we requested to exit the trade if we are not overall negative
-            if ( exitWhenPositive && netProfit >= 0 ) {
-                goFlat();
-                return;
-            }
-
-            // if net profit is <= to the per trade risk amount (or double the risk amount if we are allowed to treat each position as a seperate trade)
-            // then its stoploss so close out all positions;   note what treating trades seperatly it does not matter if there is only 1 trade one, wwe still use
-            // 2*risk value as stop loss as risk per trade will already be lower in this case as number of losses per day will be set higher
-            if ( netProfit <= getNetValueStop() ) {
-                goFlat();
-            } else {
                 flatButton.Text = $"${netProfit:0.00} (X)";
                 flatButton.BackgroundColor = netProfit < 0 ? Color.DarkRed : Color.DarkGreen;
+
+            if ( NetValueStopLoss && Positions.Count > 0 ) {
+                // if we are BE or better check if we requested to exit the trade if we are not overall negative
+                if ( exitWhenPositive && netProfit >= 0 ) {
+                    goFlat();
+                    return;
+                }
+
+                // if net profit is <= to the per trade risk amount (or double the risk amount if we are allowed to treat each position as a seperate trade)
+                // then its stoploss so close out all positions;   note what treating trades seperatly it does not matter if there is only 1 trade one, wwe still use
+                // 2*risk value as stop loss as risk per trade will already be lower in this case as number of losses per day will be set higher
+                if ( netProfit <= getNetValueStop() ) {
+                    goFlat();
+                }
             }
         }
     }
@@ -432,7 +500,8 @@ public class YTCScalpTradeBar : Robot
     }
 
     private void updateButtons() {
-        closeHalfButton.IsVisible = ( Positions.Count > 1 );
+        closePart1Button.IsVisible = ( Positions.Count > 0 );
+        closePart2Button.IsVisible = ( Positions.Count > 1 );
         bePart1Button.BackgroundColor = bePart1 ? Color.Orange : Color.Gray;
         bePart2Button.BackgroundColor = bePart2 ? Color.Orange : Color.Gray;
         exitOnPositiveButton.BackgroundColor = exitWhenPositive ? Color.Orange : Color.Gray;
@@ -446,18 +515,36 @@ public class YTCScalpTradeBar : Robot
             flatButton.Text = "GO FLAT";
             flatButton.BackgroundColor = Color.SteelBlue;
         }
-
+     
+        toggleButtonGroup(tradeLabelFlowButtons, tradeLabelFlow);
+        toggleButtonGroup(tradeLabelBiasButtons, tradeLabelBias);
     } 
 
     private void showHideButtons( bool visible ) {
         buyButton.IsVisible = visible;
         sellButton.IsVisible = visible;
-        closeHalfButton.IsVisible = !visible;
+        closePart1Button.IsVisible = !visible;
+        closePart2Button.IsVisible = !visible;
         counterButton.IsVisible = !visible;
         gotoBEPart2Button.IsVisible = !visible;
         gotoBEPart1Button.IsVisible = !visible;
+
+        showHideGroup(tradeLabelFlowButtons, visible);
+        showHideGroup(tradeLabelBiasButtons, visible );
     }
 
+    private void showHideGroup( Button[] list, bool visible ) {
+        foreach ( Button b in list ) {
+            b.IsVisible = visible;
+        }    
+    }
+
+    private void toggleButtonGroup( Button[] list, string label ) {
+        foreach ( Button b in list ) {
+            b.BackgroundColor = b.Text == label ? Color.Orange : Color.Gray;
+        }    
+    }
+    
     protected override void OnStop()
     {
         Timer.Stop();
@@ -538,7 +625,9 @@ public class YTCScalpTradeBar : Robot
     private void OnPendingOrder(PendingOrderCreatedEventArgs obj) {
         if ( updatePendingOrderVolume(obj.PendingOrder) ) {
             obj.PendingOrder.ModifyStopLossPips( getStopLossPips(obj.PendingOrder.TargetPrice) );
-            obj.PendingOrder.ModifyTakeProfitPrice( obj.PendingOrder.TradeType == TradeType.Buy ? _keltnerChannels.Top.Last(0) : _keltnerChannels.Bottom.Last(0) );
+
+            double bandRange = _innerChannels.Main.Last(0) - _innerChannels.Bottom.Last(0);
+            obj.PendingOrder.ModifyTakeProfitPrice( obj.PendingOrder.TargetPrice + (obj.PendingOrder.TradeType == TradeType.Buy ? bandRange*2 : -2*bandRange) );
         }
     }
 

@@ -1,0 +1,11 @@
+{
+  "AccessRights": "None",
+  "AddIndicators": true,
+  "Parameters": [
+    {
+      "Name": "Message",
+      "DefaultValue": "Hello world!",
+      "Type": "String"
+    }
+  ]
+}

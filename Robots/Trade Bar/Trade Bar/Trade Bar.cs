@@ -212,7 +212,7 @@ public class TradeBar : Robot
         stackPanel.AddChild(counterButton);
         counterButton.IsVisible = false;
         
-        stackPanel.AddChild(CreateHorizontalDivider());
+        stackPanel.AddChild(createHorizontalDivider());
 
         tradeTypeButtons = new Button[] {
             createTradeTypeButton(buttonStyle, "P1"),
@@ -243,7 +243,7 @@ public class TradeBar : Robot
         //    }
     }
 
-    private Border CreateHorizontalDivider()
+    private Border createHorizontalDivider()
     {
         var divider = new Border 
         {
