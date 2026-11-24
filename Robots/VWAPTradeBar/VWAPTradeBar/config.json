@@ -1,11 +1,22 @@
 {
-  "AccessRights": "None",
   "AddIndicators": true,
+  "AccessRights": "None",
+  "TimeZone": "UTC",
+  "AdditionalInfoUrl": null,
   "Parameters": [
     {
+      "DisplayName": "",
       "Name": "Message",
+      "Description": "",
+      "Type": "String",
       "DefaultValue": "Hello world!",
-      "Type": "String"
+      "MinValue": null,
+      "MaxValue": null,
+      "Step": null,
+      "Group": null,
+      "IsValueVisibleInTitle": true,
+      "EnumTypeFullName": null
     }
-  ]
+  ],
+  "Enums": []
 }

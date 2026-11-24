@@ -7,7 +7,10 @@ using cAlgo.API.Internals;
 
 namespace cAlgo.Robots;
 
-
+public class SLButton : Button
+{
+    public int StopLossTicks { get; set; }
+}
 
 [Robot(AccessRights = AccessRights.None, AddIndicators = false)]
 public partial class VWAPTradeBar : Robot
@@ -18,6 +21,22 @@ public partial class VWAPTradeBar : Robot
     // size of lots in CFD so on tick is same as value of MGC ($1.00)
     const double GC_LOT_EQ = 0.1;
 
+    // stop loss brackets for NQ
+    private static readonly int[] NQ_STOP_BRACKETS = { 20, 25, 30, 40, 50 };     // NQ stop losses are in points
+
+    // stop loss brackets for GC
+    private static readonly int[] GC_STOP_BRACKETS = { 20, 30, 40, 50, 60, 70 };     // GC stop losses are in ticks
+
+    // stop loss brackets for YM
+    private static readonly int[] YM_STOP_BRACKETS = { 30, 40, 50, 60, 70, 80 };     // YM stop losses are in ticks
+
+    // stop loss brackets for 6E/EU
+    private static readonly int[] EU_STOP_BRACKETS = { 4, 6, 8, 10 };               // EU stop losses are in pips
+
+
+    [Parameter(DefaultValue=0)]
+    public double Capital { get; set; }
+
     [Parameter(DefaultValue=0)]
     public double Drawdown { get; set; }
 
@@ -27,20 +46,20 @@ public partial class VWAPTradeBar : Robot
    // [Parameter(DefaultValue = 0.5)]
   //  public double DailyRiskLimitPercent { get; set; }
 
-    [Parameter(DefaultValue = 3)]
-    public double LossesAllowed { get; set; }
+    [Parameter(DefaultValue = 1)]
+    public double RiskPercent { get; set; }
 
-    [Parameter(DefaultValue=5)]
-    public int RedDaysInARow { get; set; }
+    //[Parameter(DefaultValue=5)]
+   // public int RedDaysInARow { get; set; }
 
     // if true each lot will actually be treated as a seperate trade, so each part counts
     // as 1 trade towrd risk limit, and have same SL and position size
-    [Parameter(DefaultValue=true)]
+    [Parameter(DefaultValue=false)]
     public bool TreatLotsAsSeperate { get; set; }
 
     // if true, SL will be set wide, and all positions are closed when cash loss >= trade risk amount
     // if TreatLotsAsSeperate is false, risk amount is computed value, is true, risk amount is double computed value
-    [Parameter(DefaultValue=true)]
+    [Parameter(DefaultValue=false)]
     public bool NetValueStopLoss { get; set; }
 
 
@@ -55,6 +74,9 @@ public partial class VWAPTradeBar : Robot
     private Button bePart1Button;
     private Button bePart2Button;
     private Button exitOnPositiveButton;
+    
+    private SLButton[] lotsButtons;
+
 
     private ChartStaticText drawDownLabel;
 
@@ -67,8 +89,7 @@ public partial class VWAPTradeBar : Robot
     private bool exitWhenPositive = false;
 
     private int stopSizeTicks;
-    private double Position1Lots;
-    private double Position2Lots;
+    private double positionLots;
 
     private double drawDownAllowed = 0;
     private double perTradeRiskAmount = 0;
@@ -78,36 +99,25 @@ public partial class VWAPTradeBar : Robot
     protected override void OnStart()
     {   
         currentATR = Indicators.AverageTrueRange(14, MovingAverageType.Simple);
+        if ( Capital == 0 ) {
+            Capital = Account.Balance > 9000 ? 10000 : 5000;
+        }
 
         // if Drawdown is not set then default to either one of our 5k or 10k accounts
         if ( Drawdown == 0 ) {
-            Drawdown = Account.Balance > 9000 ? 400 : 500;
+            Drawdown = Capital > 9000 ? 400 : 500;
         }
 
         Positions.Opened += OnPositionOpened;
         Positions.Closed += OnPositionClosed;
         PendingOrders.Created += OnPendingOrder;
 
-        var buttonStyle = new Style();
-        buttonStyle.Set(ControlProperty.Margin, new Thickness(0, 2, 0, 0));
-        buttonStyle.Set(ControlProperty.Width, 75);
+        var buttonStyle = getButtonStyle(); 
         var stackPanel = new StackPanel() {
             Orientation = Orientation.Vertical,
             HorizontalAlignment = HorizontalAlignment.Left,
             Margin = new Thickness(5)
         };
-
-      //  double positionRisk = DailyRiskLimitPercent / LossesAllowed;
-      //  Print("Position Risk: ", positionRisk);
-    //    double slBandMulitple = TreatLotsAsSeperate ? 2 : 3;
-     //   Print("SL Size: ", pipsInBand() * slBandMulitple);
-        Position1Lots = getLotsForRisk(); //Symbol.VolumeInUnitsToQuantity(Symbol.VolumeForProportionalRisk( ProportionalAmountType.Balance, positionRisk, pipsInBand() * slBandMulitple ));
-     //   Print("V4R ",Position1Lots );
-        Position2Lots = Position1Lots;
-        
-        computeInitialDrawdown();
-        drawDownLabel = Chart.DrawStaticText("drawdown", "Daily Drawdown Limit: ", VerticalAlignment.Top, HorizontalAlignment.Right, Color.WhiteSmoke);
-        showRemainingDrawdown();
 
         buyButton = new Button { Text = "BUY", Style = buttonStyle, BackgroundColor = Color.ForestGreen };
         buyButton.Click += args =>
@@ -199,10 +209,48 @@ public partial class VWAPTradeBar : Robot
             goFlat();
         };
         stackPanel.AddChild(counterButton);
-                
-        Chart.AddControl(stackPanel);
-        resetState();
+        Print("Buttons added");  
 
+        stackPanel.AddChild(createHorizontalDivider());
+
+        int[] stopBrackets = getStopBrackets();
+        int ticksPerPoint = getStopBracketPoints();
+        lotsButtons = new SLButton[ stopBrackets.Length ];
+        for ( int i = 0; i < stopBrackets.Length; i++ ) {
+            lotsButtons[i] = createLotsButton(stopBrackets[i], ticksPerPoint);
+            stackPanel.AddChild(lotsButtons[i]);
+        }
+
+        Chart.AddControl(stackPanel);
+            
+        setSLSize( lotsButtons[0].StopLossTicks );
+
+        Print("Adding label"); 
+        computeInitialDrawdown();
+        drawDownLabel = Chart.DrawStaticText("drawdown", "Daily Drawdown Limit: ", VerticalAlignment.Top, HorizontalAlignment.Right, Color.WhiteSmoke);
+        showRemainingDrawdown();
+
+        resetState();
+    }
+
+    private Style getButtonStyle() {
+        var buttonStyle = new Style();
+        buttonStyle.Set(ControlProperty.Margin, new Thickness(0, 2, 0, 0));
+        buttonStyle.Set(ControlProperty.Width, 75);
+        return buttonStyle;
+    }
+
+    private SLButton createLotsButton( int slTicks, int ticksPerPoint ) {
+        int sl = slTicks * ticksPerPoint;
+        string lbl = ticksPerPoint == 1 ? "Tick" : "Pt";
+        SLButton btn = new SLButton { Text = FormattableString.Invariant($"{slTicks} {lbl} SL"), Style = getButtonStyle(), BackgroundColor = Color.SteelBlue };
+        btn.StopLossTicks = sl;
+        btn.Click += args => 
+        { 
+            setSLSize( slTicks ); 
+            showRemainingDrawdown(); 
+        };
+        return btn;
     }
 
     private Border createHorizontalDivider()
@@ -215,6 +263,22 @@ public partial class VWAPTradeBar : Robot
         };
         return divider;
     }
+
+    private int[] getStopBrackets() => Symbol.Name switch
+    {
+        "US30.x" => YM_STOP_BRACKETS,
+        "XAUUSD.x" => GC_STOP_BRACKETS,
+        "EURUSD.x" => EU_STOP_BRACKETS,
+        _ => NQ_STOP_BRACKETS 
+    };
+
+    private int getStopBracketPoints() => Symbol.Name switch
+    {
+        "US30.x" => 1,
+        "XAUUSD.x" => 1,         // show gold in ticks, ignore points
+        "EURUSD.x" => 1,
+        _ => 10                 // default for indices
+    };
 
     // return total drawdown experience so far today, used for initialiazion
     // after init a running drawdown total is tracked to safve iterating entire history
@@ -233,23 +297,34 @@ public partial class VWAPTradeBar : Robot
     }
 
     private double getLotsForRisk() {
-        stopSizeTicks = computeSLSize();
+     //   stopSizeTicks = computeSLSize();
      //   Print("SL Size: ", stopSizeTicks);
 
         // Risk is total max loss for trade, so divide in half so we can place two positions
-        double riskAmount = Drawdown / RedDaysInARow / LossesAllowed / 2; //(Capital * (DailyRiskLimitPercent / 100))  / LossesAllowed;
+     //   double riskAmount = Drawdown / RedDaysInARow / LossesAllowed / 2; //(Capital * (DailyRiskLimitPercent / 100))  / LossesAllowed;
        // Print("Drawdown ", Drawdown, " / Risk Amount: ", riskAmount);
-
+       // half risk as we put positions on in two parts, and covery to percent
+        double riskAmount = (( RiskPercent/2) / 100 ) * Capital;
         double calculatedVolume  = riskAmount / (stopSizeTicks * Symbol.PipValue);
         return Symbol.VolumeInUnitsToQuantity( Symbol.NormalizeVolumeInUnits(calculatedVolume) );
-      //  return Symbol.Name.Substring(0,3) == "NAS" ? NQ_LOT_EQ : GC_LOT_EQ; //
+
+      ///  double pipValuePerUnit = Symbol.PipValue / Symbol.LotSize;
+     ///   Print("Pips value Per Unit : ", pipValuePerUnit);
+      ///  double riskAmount = RiskPercent * Capital;
+     ///   Print("RA: ", riskAmount);
+       // double calculatedVolume  = riskAmount / (stopSizeTicks * Symbol.PipValue);
+       //  Print("CV: ", calculatedVolume);
+///
+   ///     double volumeInUnits = riskAmount / (stopSizeTicks * pipValuePerUnit);
+    ///    return Symbol.VolumeInUnitsToQuantity( Symbol.NormalizeVolumeInUnits(volumeInUnits, RoundingMode.ToNearest) );
+        //  return Symbol.Name.Substring(0,3) == "NAS" ? NQ_LOT_EQ : GC_LOT_EQ; //
     }
 
     private void showRemainingDrawdown() {
-        perTradeRiskAmount = (Symbol.QuantityToVolumeInUnits(Position1Lots) * stopSizeTicks) * 2; // + (TreatLotsAsSeperate ? 0 : Symbol.QuantityToVolumeInUnits(Position2Lots) * stopSizeTicks)) * Symbol.PipValue;
+        perTradeRiskAmount = (Symbol.QuantityToVolumeInUnits(positionLots) * stopSizeTicks) * 2; // + (TreatLotsAsSeperate ? 0 : Symbol.QuantityToVolumeInUnits(Position2Lots) * stopSizeTicks)) * Symbol.PipValue;
         double netValueStop = getNetValueStop();
         string stoptype = ( NetValueStopLoss ? $"Net Value Stop ${netValueStop:0.00}" : "Hard Stop");
-        drawDownLabel.Text = FormattableString.Invariant($"SL: {stopSizeTicks} Lots: {Position1Lots:0.0##}/{Position2Lots:0.0##}  Risk: ${perTradeRiskAmount:0.00}   P&L: ${drawDownAllowed:0.00}  {stoptype}");
+        drawDownLabel.Text = FormattableString.Invariant($"SL: {stopSizeTicks} Lots: {positionLots:0.0##} x 2  Risk: ${perTradeRiskAmount:0.00}   P&L: ${drawDownAllowed:0.00}  {stoptype}");
        /* if ( drawDownAllowed <= perTradeRiskAmount ) {
             drawDownLabel.Color = Color.OrangeRed;
         } else if ( drawDownAllowed < 0 ) {
@@ -303,12 +378,11 @@ public partial class VWAPTradeBar : Robot
             // right now bump this by one to cater for order not in system yet
             int totalOrders = Positions.Count + PendingOrders.Count + (newMarketOrder ? 1 : 0);
             if ( totalOrders == 1 || TreatLotsAsSeperate ) {
-                // first order always has a stop size to include basic and major wholesale region
-                // if we are treating each position as a seperate trade (so it counts as 1 of our daily risks) then it gets same
-                // size stop no matter if it is second or first order
+                // first order always has the full stop size
                 return stopSizeTicks;
             } else {
-                // second order has same stop loss as first 
+                // second order has same stop loss as first , so if price has moved since entry it can be a different number
+                // of ticks, hence the seperate treatment
                 if ( Positions.Count > 0 ) {
                     return toPips( Math.Abs(price - Positions.OrderBy(order => order.EntryTime).FirstOrDefault().StopLoss ?? 0) );
                 } else {
@@ -328,7 +402,7 @@ public partial class VWAPTradeBar : Robot
 
     private double getLots( double price ) {
         // ensure SL calculation is up to date
-        Position2Lots = Position1Lots = getLotsForRisk();
+        positionLots = getLotsForRisk();
         showRemainingDrawdown();
 
         // if already have 2 positions (active or pending) dont allow
@@ -336,7 +410,16 @@ public partial class VWAPTradeBar : Robot
         if ( getTotalOrders() > 2 ) {
             return 0.0;
         } else {
-            return getTotalOrders() == 0 ? Position1Lots : Position2Lots;
+            return positionLots;
+        }
+    }
+
+    private void setSLSize( int slTicks ) {
+        stopSizeTicks = slTicks;
+        positionLots = getLotsForRisk();
+        Print("SL set to ", stopSizeTicks);
+        foreach ( SLButton btn in lotsButtons ) {
+            btn.BackgroundColor = (int)btn.StopLossTicks == slTicks ? Color.Orange : Color.Gray;
         }
     }
 
@@ -400,8 +483,8 @@ public partial class VWAPTradeBar : Robot
                 netProfit += p.NetProfit;
             }
 
-                flatButton.Text = $"${netProfit:0.00} (X)";
-                flatButton.BackgroundColor = netProfit < 0 ? Color.DarkRed : Color.DarkGreen;
+            flatButton.Text = $"${netProfit:0.00} (X)";
+            flatButton.BackgroundColor = netProfit < 0 ? Color.DarkRed : Color.DarkGreen;
 
             if ( NetValueStopLoss && Positions.Count > 0 ) {
                 // if we are BE or better check if we requested to exit the trade if we are not overall negative
